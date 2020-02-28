@@ -9,11 +9,12 @@ This app provides a replacement for time.sleep(), with the following properites:
    - Snoozing threads can specify they're ok being woken up a bit early if that
      facilitates batching together of operations (fewer wakeup events)
 
+
 ## Dependencies
 
 You will need:
 
-   * Python 2.7
+   * Python 2.7 or 3.x (author tested on 3.7)
 
 
 ## Code example

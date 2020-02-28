@@ -7,7 +7,10 @@ import time
 import threading
 import traceback
 
-from Queue import Queue, Empty
+try:
+    from queue import Queue, Empty  # python 3+
+except ImportError:
+    from Queue import Queue, Empty  # python 2.7
 
 
 _conductor_lock = threading.Lock()
@@ -34,7 +37,7 @@ class _SnoozeBot(threading.Thread):
         # FIXME: See if we have inotify?
 
     def _wake_up(self):
-        socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto('\1', self.wql_addr)
+        socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'\1', self.wql_addr)
 
     def _sleep(self, seconds=None):
         try:
@@ -53,7 +56,7 @@ class _SnoozeBot(threading.Thread):
         if self.changed:
             global _conductor_lock
             with _conductor_lock:
-                self.select_r = [self.wql.fileno()] + self.fd_watchers.keys()
+                self.select_r = [self.wql.fileno()] + list(self.fd_watchers.keys())
                 self.sleepers.sort()
                 self.changed = False
 
@@ -220,20 +223,24 @@ if __name__ == '__main__':
     def snoozer(seconds, mnm, fds, cond):
         def sn():
             try:
+                print('%d: Snoozing for up to %ss' % (time.time(), seconds))
                 snooze(seconds, minimum=mnm, watch_fds=fds, condition=cond)
                 snooze(0.1)
-                print('Snoozing complete!')
+                print('%d: Snoozing complete! (%s/%s)' % (time.time(), seconds, mnm))
             except:
                 traceback.print_exc()
         return sn
 
     print('The time is %.2f' % time.time())
-    threading.Thread(target=snoozer(2.2, None, None, silly_condition)).start()
-    threading.Thread(target=snoozer(20, None, [sys.stdin.fileno()], None)).start()
-    threading.Thread(target=snoozer(3600, 5, None, None)).start()
     try:
-        snooze(10.0)
-        wake_all()
+        threading.Thread(target=snoozer(2.2, None, None, silly_condition)).start()
+        threading.Thread(target=snoozer(3600, 1, None, None)).start()
+        snooze(1.5)
+        threading.Thread(target=snoozer(20, None, [sys.stdin.fileno()], None)).start()
+        snooze(8.5)
+        wake_all(throw=IOError)
     except KeyboardInterrupt:
+        print('Interrupted at %.2f' % time.time())
         wake_all(throw=KeyboardInterrupt, targs=('User aborted',))
     print('The time is %.2f' % time.time())
+    time.sleep(1)
