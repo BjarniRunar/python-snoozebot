@@ -13,7 +13,8 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with snoozebot. If not, see <https://www.gnu.org/licenses/>.
 #
-__author__ = 'Bjarni R. Einarsson <bre@kalaki.net>'
+__author__ = 'Bjarni R. Einarsson <bre@klaki.net>'
+__author_email__ = 'bre@klaki.net'
 __version__ = '0.0.1'
 __doc__ = """A coordinated and interruptible time.sleep() replacement
 

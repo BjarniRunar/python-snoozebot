@@ -1,13 +1,33 @@
-# python-snoozebot: Smart sleep replacment for threaded apps
+# python-snoozebot: A coordinated and interruptible time.sleep() replacement
 
-This app provides a replacement for time.sleep(), with the following properites:
+This module implements a time.sleep() replacement, snoozebot.snooze(), which
+is more suitable for use in multithreaded apps:
 
-   - Snooze tries to be battery-friendly and avoid busy waits
-   - All snoozing threads can be woken up at once
-   - Interrupted snoozers can be awoken with an exception
-   - Threads can request they be woken up if a socket or file is ready to read
-   - Snoozing threads can specify they're ok being woken up a bit early if that
-     facilitates batching together of operations (fewer wakeup events)
+  * Threads can be woken up (optionally, with an exception) to facilitate
+    prompt, clean shutdown.
+  * Snoozing can be cut short if file descriptor(s) becomes readable
+  * Snoozing threads can specify an interval of acceptable wakeup times,
+    to facilitate grouping jobs together (thus hopefully playing nice with
+    powersavings on modern/mobile CPUs).
+
+## Usage:
+
+    from snoozebot import snooze, wake_all
+
+    # Interruptable sleep for 1 second
+    snooze(1.0)
+
+    # Sleep for anywhere between 1 minute and 1 hour
+    snooze(60, 3600)
+
+    # Sleep an hour, but wake up early for activity on sys.stdin
+    snooze(3600, watch_fds=[sys.stdin.fileno()])
+
+    # Just wake all snoozers
+    wake_all()
+
+    # Wake all snoozers with a KeyboardInterrupt!
+    wake_all(KeyboardInterrupt, 'Time to die')
 
 
 ## Dependencies
@@ -15,20 +35,6 @@ This app provides a replacement for time.sleep(), with the following properites:
 You will need:
 
    * Python 2.7 or 3.x (author tested on 3.7)
-
-
-## Code example
-
-    from snoozebot import snooze, wake_all
-
-    # Thread 1
-    snooze(1.5)  # Sleep for at least 1.5 seconds
-
-    # Thread 2
-    snooze(300, watch_fds=[mysocket.fileno()])
-
-    # Thread 3
-    wake_all(KeyboardInterrupt, 'Boo')
 
 
 ## Bugs
@@ -39,7 +45,7 @@ itself.
 
 ## Copyright, license, credits
 
-This code is: (C) Copyright 2020, Bjarni R. Einarsson <bre@mailpile.is>
+This code is: (C) Copyright 2020, Bjarni R. Einarsson <bre@klaki.net>
 
 Snoozebot is free software: you can redistribute it and/or modify
 it under the terms of the GNU Lesser General Public License as
