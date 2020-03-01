@@ -28,7 +28,7 @@ You will need:
     snooze(300, watch_fds=[mysocket.fileno()])
 
     # Thread 3
-    wake_all(throw=KeyboardInterrupt, args=('Boo',))
+    wake_all(KeyboardInterrupt, 'Boo')
 
 
 ## Bugs
