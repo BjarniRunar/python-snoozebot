@@ -15,7 +15,7 @@
 #
 __author__ = 'Bjarni R. Einarsson <bre@klaki.net>'
 __author_email__ = 'bre@klaki.net'
-__version__ = '0.0.1'
+__version__ = '0.0.2'
 __doc__ = """A coordinated and interruptible time.sleep() replacement
 
 This module implements a time.sleep() replacement, snoozebot.snooze(), which
