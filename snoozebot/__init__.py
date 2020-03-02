@@ -60,7 +60,7 @@ except ImportError:
     from Queue import Queue, Empty  # python 2.7
 
 
-_conductor_lock = threading.Lock()
+_conductor_lock = threading.RLock()
 _conductor = None
 
 
@@ -94,7 +94,7 @@ class _SnoozeBot(threading.Thread):
                 if fno == wql_fno:
                     self.wql.recvfrom(1024)
                 for sleeper in self.fd_watchers.get(fno, []):
-                    sleeper[0] = sleeper[1] = 0
+                    sleeper.earliest = sleeper.latest = 0
             return self.keep_running
         except:
             return None
@@ -108,10 +108,16 @@ class _SnoozeBot(threading.Thread):
                 self.changed = False
 
     def _wake(self, sleeper, throw=None, targs=None):
+        sleeper.wake(throw, targs)  # This calls remove() for us
+
+    def _ready(self, now):
+        return [s for s in self.sleepers if s._ready()]
+
+    def remove(self, sleeper):
         global _conductor_lock
         with _conductor_lock:
-            sleeper[0] = sleeper[1] = 0
-            for fno in (sleeper[-2] or []):
+            sleeper.earliest = sleeper.latest = 0
+            for fno in sleeper.watch_fds:
                 try:
                     self.fd_watchers[fno].remove(sleeper)
                     if not self.fd_watchers[fno]:
@@ -119,37 +125,27 @@ class _SnoozeBot(threading.Thread):
                     self.changed = True
                 except KeyError:
                     pass
-            # FIXME: Clean up dir_watchers , set changed=True
-        sleeper[-1].put((throw, targs))
 
-    def _ready(self, now):
-        return [s for s in self.sleepers if s[0] <= now or s[1] <= now]
-
-    def snooze(self, seconds, maximum, watch_fds, snoozeq):
-        if snoozeq is None:
-            snoozeq = Queue()
-        if maximum is None:
-            maximum = seconds
-
+    def snooze(self, sleeper):
         now = time.time()
-        wake = False
         global _conductor_lock
         with _conductor_lock:
-            d0 = self.sleepers[0][:2] if self.sleepers else [0, 0]
-            sleeper = [
-                now + maximum, now + seconds, maximum, seconds,
-                watch_fds, snoozeq]
-            for fd in watch_fds or []:
+            for fd in sleeper.watch_fds:
                 self.fd_watchers[fd] = self.fd_watchers.get(fd, [])
                 self.fd_watchers[fd].append(sleeper)
+
+            d0 = self.sleepers[0]._deadlines() if self.sleepers else (0, 0)
             self.sleepers.append(sleeper)
             self.sleepers.sort()
             self.changed = True
-            wake = (self.sleepers[0][:2] != d0) or self._ready(now)
 
-        if wake:
-            self._wake_up()
-        return snoozeq
+            # Note: The _ready(now) call is how we batch thread activity; we
+            #       are putting one thread to sleep, so we check if any other
+            #       snoozer is willing to wake up and take their place.
+            if (self.sleepers[0]._deadlines() != d0) or self._ready(now):
+                self._wake_up()
+
+        return sleeper
 
     def wake_all(self, throw, *targs):
         global _conductor_lock
@@ -162,7 +158,7 @@ class _SnoozeBot(threading.Thread):
             self._wake_up()
 
         for sleeper in sleepers:
-            self._wake(sleeper, throw=throw, targs=targs)
+            sleeper.wake(throw, *targs)
 
     def run(self):
         global _conductor_lock, _conductor
@@ -171,29 +167,114 @@ class _SnoozeBot(threading.Thread):
             while self.keep_running and self.sleepers:
                 try:
                     self._reconfigure()
-                    latest, earliest = self.sleepers[0][:2]
+                    latest, earliest = self.sleepers[0]._deadlines()
 
                     now = time.time()
                     if now < earliest:
                         self._sleep(latest - now)
                         now = time.time()
 
-                    waking = [s for s in self.sleepers if now >= s[0]]
+                    waking = [s for s in self.sleepers if now >= s.latest]
                     if not waking:
                         waking = self._ready(now)
-                        waking.sort(key=lambda s: s[1])
+                        waking.sort(key=lambda s: s.earliest)
                         waking = waking[:1]
 
                     if waking:
                         for sleeper in waking:
                             self._wake(sleeper)
                         with _conductor_lock:
-                            self.sleepers = [s for s in self.sleepers if s[0] > 0]
+                            self.sleepers = [s for s in self.sleepers if s.latest]
                 except:
                     traceback.print_exc()
 
         with _conductor_lock:
             _conductor = None
+
+
+class Snoozer:
+    """
+    This is a reusable Snooze schedule, which also provides a wake() function
+    so other parts of an app can wake up a specific snoozing thread.
+    """
+    def __init__(self, seconds, maximum=None, watch_fds=None, snoozeq=None):
+        """
+        Create a new Snoozer. See the documentation for snoozebot.snooze() for
+        an explanation of the arguments and their meanings.
+        """
+        self._lock = threading.Lock()
+        self.snoozeq = snoozeq or Queue()
+        self.seconds = seconds
+        self.maximum = max(maximum or 0, seconds)
+        self.earliest = 0
+        self.latest = 0
+        self.watch_fds = watch_fds or []
+
+    def __lt__(s, o): return s._deadlines() < o._deadlines()
+    def __le__(s, o): return s._deadlines() <= o._deadlines()
+    def __gt__(s, o): return s._deadlines() > o._deadlines()
+    def __ge__(s, o): return s._deadlines() >= o._deadlines()
+
+    def _deadlines(self):
+        return (self.latest, self.earliest)
+
+    def _ready(self, now=None):
+        return (self.earliest <= (now if (now is not None) else time.time()))
+
+    def wake(self, *exception_and_args):
+        """
+        Wake up the snoozing thread. If any arguments are given, the first
+        should be an exception to raise in the woken thread, followed by
+        arguments to the exception itself. Examples:
+
+            snoozer.wake()
+            snoozer.wake(KeyboardInterrupt)
+            snoozer.wake(KeyboardInterrupt, 'User aborted')
+        """
+        throw = exception_and_args[0] if exception_and_args else None
+        targs = exception_and_args[1:] or None
+        with _conductor_lock:
+            if _conductor is not None:
+                _conductor.remove(self)
+        self.snoozeq.put((throw, targs))
+
+    def snooze(self):
+        """
+        Put the calling thread to sleep, according to the defined schedule.
+        """
+        global _conductor_lock, _conductor
+        if self._lock.locked():
+            raise IOError("Snoozer is already in use!")
+        with self._lock:
+            now = time.time()
+
+            if self.maximum < 0.5:
+                with _conductor_lock:
+                    if _conductor is not None and _conductor._ready(now):
+                        # We are going to sleep, does anyone want to wake up?
+                        _conductor._wake_up()
+                # Special case short circuit: just do the simple thing.
+                return time.sleep(self.maximum)
+
+            with _conductor_lock:
+                if _conductor is None:
+                    _conductor = _SnoozeBot()
+                    _conductor.start()
+            try:
+                # Empty the queue, in case we are being reused
+                while not self.snoozeq.empty():
+                    self.snoozeq.get(False)
+
+                # Calculate our deadliens
+                self.earliest = now + self.seconds
+                self.latest = now + self.maximum
+
+                # Hand over to the conductor!
+                exc, targs = _conductor.snooze(self).snoozeq.get(True, self.maximum)
+                if exc is not None:
+                    raise(exc(*(targs or [])))  # Woken up?
+            except Empty:
+                pass
 
 
 def snooze(seconds, maximum=None, watch_fds=None, snoozeq=None):
@@ -209,29 +290,7 @@ def snooze(seconds, maximum=None, watch_fds=None, snoozeq=None):
     If a snoozeq is provided, it should be a Queue object which can be used
     to wake this thread up.
     """
-    global _conductor_lock, _conductor
-
-    if maximum is None:
-        maximum = seconds
-    if maximum < 0.5:
-        # Special case short circuit: just do the simple thing.
-        with _conductor_lock:
-            if _conductor is not None and _conductor._ready(time.time()):
-                _conductor._wake_up()
-        return time.sleep(maximum)
-
-    with _conductor_lock:
-        if _conductor is None:
-            _conductor = _SnoozeBot()
-            _conductor.start()
-    try:
-        exc, targs = _conductor.snooze(
-            seconds, maximum, watch_fds, snoozeq
-            ).get(True, seconds)
-        if exc is not None:
-            raise(exc(*(targs or [])))  # Woken up?
-    except Empty:
-        pass
+    return Snoozer(seconds, maximum, watch_fds, snoozeq).snooze()
 
 
 def wake_all(*exception_and_args):

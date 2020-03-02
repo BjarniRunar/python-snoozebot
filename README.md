@@ -12,7 +12,7 @@ is more suitable for use in multithreaded apps:
 
 ## Usage:
 
-    from snoozebot import snooze, wake_all
+    from snoozebot import Snoozer, snooze, wake_all
 
     # Interruptable sleep for 1 second
     snooze(1.0)
@@ -22,6 +22,11 @@ is more suitable for use in multithreaded apps:
 
     # Sleep an hour, but wake up early for activity on sys.stdin
     snooze(3600, watch_fds=[sys.stdin.fileno()])
+
+    # Create a re-usable schedule which can be woken by other means
+    sn = Snoozer(60, 3600, watch_fds=[sys.stdin.fileno()]))
+    sn.snooze()
+    sn.wake()  # Other thread wakes this one up early
 
     # Just wake all snoozers
     wake_all()
