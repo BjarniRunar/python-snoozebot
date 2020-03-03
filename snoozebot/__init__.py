@@ -30,7 +30,7 @@ is more suitable for use in multithreaded apps:
 
 Usage:
 
-    from snoozebot import snooze, wake_all
+    from snoozebot import snooze, wake_all, WOKE_FD
 
     # Interruptable sleep for 1 second
     snooze(1.0)
@@ -39,7 +39,9 @@ Usage:
     snooze(60, 3600)
 
     # Sleep an hour, but wake up early for activity on sys.stdin
-    snooze(3600, watch_fds=[sys.stdin.fileno()])
+    reason = snooze(3600, watch_fds=[sys.stdin.fileno()])
+    if reason[0] == WOKE_FD:
+        data = reason[1].read()
 
     # Just wake all snoozers
     wake_all()
@@ -62,6 +64,23 @@ except ImportError:
 
 _conductor_lock = threading.RLock()
 _conductor = None
+
+
+# The order of these matter; higher priority reasons override
+# lower-priority ones internally.
+WOKE_UNKNOWN = 0
+WOKE_OTHER   = 1
+WOKE_NORMAL  = 10
+WOKE_EARLY   = 20
+WOKE_FD      = 30
+WOKE_ALL     = 40
+WOKE_CUSTOM  = 99
+
+_WOKE_UNKNOWN = (WOKE_UNKNOWN, 'Unknown')
+_WOKE_OTHER   = (WOKE_OTHER,   'App-internal wake-up')
+_WOKE_NORMAL  = (WOKE_NORMAL,  'Normal')
+_WOKE_EARLY   = (WOKE_EARLY,   'Woke early')
+_WOKE_ALL     = (WOKE_ALL,     'All snoozes were aborted')
 
 
 class _SnoozeBot(threading.Thread):
@@ -94,7 +113,8 @@ class _SnoozeBot(threading.Thread):
                 if fno == wql_fno:
                     self.wql.recvfrom(1024)
                 for sleeper in self.fd_watchers.get(fno, []):
-                    sleeper.earliest = sleeper.latest = 0
+                    sleeper.reason(WOKE_FD, fno)
+                    sleeper._earliest = sleeper._latest = 0
             return self.keep_running
         except:
             return None
@@ -116,7 +136,7 @@ class _SnoozeBot(threading.Thread):
     def remove(self, sleeper):
         global _conductor_lock
         with _conductor_lock:
-            sleeper.earliest = sleeper.latest = 0
+            sleeper._earliest = sleeper._latest = 0
             for fno in sleeper.watch_fds:
                 try:
                     self.fd_watchers[fno].remove(sleeper)
@@ -158,7 +178,7 @@ class _SnoozeBot(threading.Thread):
             self._wake_up()
 
         for sleeper in sleepers:
-            sleeper.wake(throw, *targs)
+            sleeper.reason(*_WOKE_ALL).wake(throw, *targs)
 
     def run(self):
         global _conductor_lock, _conductor
@@ -174,17 +194,19 @@ class _SnoozeBot(threading.Thread):
                         self._sleep(latest - now)
                         now = time.time()
 
-                    waking = [s for s in self.sleepers if now >= s.latest]
+                    reason = _WOKE_NORMAL
+                    waking = [s for s in self.sleepers if now >= s._latest]
                     if not waking:
+                        reason = _WOKE_EARLY
                         waking = self._ready(now)
-                        waking.sort(key=lambda s: s.earliest)
+                        waking.sort(key=lambda s: s._earliest)
                         waking = waking[:1]
 
                     if waking:
                         for sleeper in waking:
-                            self._wake(sleeper)
+                            self._wake(sleeper.reason(*reason))
                         with _conductor_lock:
-                            self.sleepers = [s for s in self.sleepers if s.latest]
+                            self.sleepers = [s for s in self.sleepers if s._latest]
                 except:
                     traceback.print_exc()
 
@@ -194,21 +216,22 @@ class _SnoozeBot(threading.Thread):
 
 class Snoozer:
     """
-    This is a reusable Snooze schedule, which also provides a wake() function
-    so other parts of an app can wake up a specific snoozing thread.
+    This is a reusable Snooze schedule, which also provides a wake()
+    function so other parts of an app can wake a snoozing thread.
     """
     def __init__(self, seconds, maximum=None, watch_fds=None, snoozeq=None):
         """
-        Create a new Snoozer. See the documentation for snoozebot.snooze() for
+        Create a new Snoozer. See the snoozebot.snooze() help for
         an explanation of the arguments and their meanings.
         """
         self._lock = threading.Lock()
         self.snoozeq = snoozeq or Queue()
         self.seconds = seconds
         self.maximum = max(maximum or 0, seconds)
-        self.earliest = 0
-        self.latest = 0
         self.watch_fds = watch_fds or []
+        self._earliest = 0
+        self._latest = 0
+        self._wake_reason = _WOKE_UNKNOWN
 
     def __lt__(s, o): return s._deadlines() < o._deadlines()
     def __le__(s, o): return s._deadlines() <= o._deadlines()
@@ -216,10 +239,22 @@ class Snoozer:
     def __ge__(s, o): return s._deadlines() >= o._deadlines()
 
     def _deadlines(self):
-        return (self.latest, self.earliest)
+        return (self._latest, self._earliest)
 
     def _ready(self, now=None):
-        return (self.earliest <= (now if (now is not None) else time.time()))
+        return (self._earliest <= (now if (now is not None) else time.time()))
+
+    def reason(self, rcode, details):
+        """
+        If called right before wake(), this will configure the reason
+        returned by the in-flight snooze() call. Apps should use the
+        WOKE_CUSTOM code, otherwise the reason might get overwritten.
+
+        Returns the Snoozer object itself, for chaining with woke().
+        """
+        if rcode >= self._wake_reason[0]:
+            self._wake_reason = (rcode, details)
+        return self
 
     def wake(self, *exception_and_args):
         """
@@ -236,11 +271,16 @@ class Snoozer:
         with _conductor_lock:
             if _conductor is not None:
                 _conductor.remove(self)
-        self.snoozeq.put((throw, targs))
+        self.reason(*_WOKE_OTHER).snoozeq.put((throw, targs))
 
     def snooze(self):
         """
         Put the calling thread to sleep, according to the defined schedule.
+        Returns a tuple (WOKE_x, reason) explaining why the snooze ended.
+
+        If the snooze ended because of a watched file descriptor, the reason
+        will be the file descriptor that showed activity, otherwise reasons
+        are human-readable text to aid with debugging.
         """
         global _conductor_lock, _conductor
         if self._lock.locked():
@@ -254,32 +294,37 @@ class Snoozer:
                         # We are going to sleep, does anyone want to wake up?
                         _conductor._wake_up()
                 # Special case short circuit: just do the simple thing.
-                return time.sleep(self.maximum)
+                time.sleep(self.maximum)
+                return _WOKE_NORMAL
 
             with _conductor_lock:
                 if _conductor is None:
                     _conductor = _SnoozeBot()
                     _conductor.start()
             try:
-                # Empty the queue, in case we are being reused
+                # Reset state, in case we are being reused
                 while not self.snoozeq.empty():
                     self.snoozeq.get(False)
+                self._wake_reason = _WOKE_UNKNOWN
 
                 # Calculate our deadliens
-                self.earliest = now + self.seconds
-                self.latest = now + self.maximum
+                self._earliest = now + self.seconds
+                self._latest = now + self.maximum
 
                 # Hand over to the conductor!
-                exc, targs = _conductor.snooze(self).snoozeq.get(True, self.maximum)
+                exc, targs = (
+                    _conductor.snooze(self).snoozeq.get(True, self.maximum))
                 if exc is not None:
                     raise(exc(*(targs or [])))  # Woken up?
+                return self._wake_reason
             except Empty:
-                pass
+                return _WOKE_NORMAL
 
 
 def snooze(seconds, maximum=None, watch_fds=None, snoozeq=None):
     """
     Put this thread to sleep for up to `seconds` seconds.
+    Returns a tuple (WOKE_x, reason) explaining why the snooze ended.
 
     If a maximum is specified, the thread may opportunistically be woken up
     any time after seconds have passed, up to the maximum time.
@@ -289,6 +334,10 @@ def snooze(seconds, maximum=None, watch_fds=None, snoozeq=None):
 
     If a snoozeq is provided, it should be a Queue object which can be used
     to wake this thread up.
+
+    If the snooze ended because of a watched file descriptor, the reason
+    will be the file descriptor that showed activity, otherwise reasons
+    are human-readable text to aid with debugging.
     """
     return Snoozer(seconds, maximum, watch_fds, snoozeq).snooze()
 
@@ -312,9 +361,9 @@ if __name__ == '__main__':
         def sn():
             try:
                 print('%d: Snoozing for up to %ss' % (time.time(), seconds))
-                snooze(seconds, maximum, watch_fds=fds)
-                snooze(0.1)
-                print('%d: Snoozing complete! (%s/%s)' % (time.time(), seconds, maximum))
+                r1 = snooze(seconds, maximum, watch_fds=fds)
+                r2 = snooze(0.1)
+                print('%d: Snoozing complete! (%s/%s) reasons=%s/%s' % (time.time(), seconds, maximum, r1, r2[0]))
             except:
                 traceback.print_exc()
         return sn
