@@ -12,7 +12,8 @@ is more suitable for use in multithreaded apps:
 
 ## Usage:
 
-    from snoozebot import Snoozer, snooze, wake_all, WOKE_FD
+    import snoozebot
+    from snoozebot import Snoozer, snooze, wake_all
 
     # Interruptable sleep for 1 second
     snooze(1.0)
@@ -22,13 +23,15 @@ is more suitable for use in multithreaded apps:
 
     # Sleep an hour, but wake up early for activity on sys.stdin
     reason = snooze(3600, watch_fds=[sys.stdin.fileno()])
-    if reason[0] == WOKE_FD:
+    if reason[0] == snoozebot.WOKE_FD:
         data = reason[1].read()
 
     # Create a re-usable schedule which can be woken by other means
     sn = Snoozer(60, 3600, watch_fds=[sys.stdin.fileno()]))
     sn.snooze()
-    sn.wake()  # Other thread wakes this one up early
+
+    # Other thread wakes us up...
+    sn.reason(snoozebot.WOKE_CUSTOM, 'Good morning!').wake()
 
     # Just wake all snoozers
     wake_all()
